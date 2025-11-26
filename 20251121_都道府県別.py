@@ -902,16 +902,34 @@ def show_nationality_compare_dashboard(df: pd.DataFrame):
         st.error("国籍・地域 列がデータに存在しません。")
         return
 
-    # 円／人 と 円／人・日 の両方を対象
-    expense_cols = [
+    # ★ 比較対象の選択肢は「（円／人）」だけにしておく
+    base_exp_cols = [
         c for c in df.columns
-        if ("（円／人）" in c) or ("（円／人・日）" in c)
+        if "（円／人）" in c
     ]
-    if not expense_cols:
-        st.error("「（円／人）」または「（円／人・日）」を含む支出列が見つかりませんでした。")
+    if not base_exp_cols:
+        st.error("「（円／人）」を含む支出列が見つかりませんでした。")
         return
 
-    target_exp_col = st.sidebar.selectbox("比較したい支出項目", expense_cols)
+    base_exp_col = st.sidebar.selectbox("比較したい支出項目", base_exp_cols)
+
+    # ★ 1日あたりで見るかどうかを選択
+    use_per_day = st.sidebar.checkbox(
+        "1日あたり（円／人・日）に換算して比較する",
+        value=False
+    )
+
+    # 実際に集計に使う列名と単位を決定
+    target_exp_col = base_exp_col
+    unit = "円／人"
+
+    if use_per_day:
+        per_day_col = base_exp_col.replace("（円／人）", "（円／人・日）")
+        if per_day_col in df.columns:
+            target_exp_col = per_day_col
+            unit = "円／人・日"
+        else:
+            st.sidebar.warning("この項目の 1日あたり列（円／人・日）が見つからなかったため、総額（円／人）で表示します。")
 
     nat_list = sorted(df["国籍・地域"].dropna().unique())
     default_nats = []
@@ -941,7 +959,8 @@ def show_nationality_compare_dashboard(df: pd.DataFrame):
         df_filtered = df_filtered[df_filtered["都道府県"].isin(pref_selected)]
 
     st.subheader("現在の条件（国籍ベース）")
-    st.write(f"- 比較項目：**{target_exp_col}**")
+    st.write(f"- 比較項目：**{base_exp_col}**")
+    st.write(f"- 単位　　：**{unit}**")
     st.write(f"- 国籍・地域：**{', '.join(nat_selected) if nat_selected else '（未選択）'}**")
     if pref_selected:
         st.write(f"- 都道府県：**{', '.join(pref_selected)}**")
@@ -950,8 +969,6 @@ def show_nationality_compare_dashboard(df: pd.DataFrame):
         st.warning("この条件に一致するデータがありません。条件を見直してください。")
         return
 
-    # 単位ラベルを動的に変更
-    unit = "円／人・日" if "（円／人・日）" in target_exp_col else "円／人"
     y_col_name = f"平均額（{unit}）"
 
     summary = (
@@ -968,7 +985,7 @@ def show_nationality_compare_dashboard(df: pd.DataFrame):
         summary,
         x="国籍・地域",
         y=y_col_name,
-        title=f"{target_exp_col} の国籍別平均（{unit}）"
+        title=f"{base_exp_col} の国籍別平均（{unit}）"
     )
     fig.update_yaxes(tickformat=",")
     fig.update_traces(hovertemplate="%{x}: %{y:,.0f} 円")
@@ -992,16 +1009,34 @@ def show_residence_compare_dashboard(df: pd.DataFrame):
         st.error("居住地（または居住地・地域）に相当する列が見つかりません。")
         return
 
-    # 円／人 と 円／人・日 の両方を対象
-    expense_cols = [
+    # ★ 比較対象の選択肢は「（円／人）」だけにする
+    base_exp_cols = [
         c for c in df.columns
-        if ("（円／人）" in c) or ("（円／人・日）" in c)
+        if "（円／人）" in c
     ]
-    if not expense_cols:
-        st.error("「（円／人）」または「（円／人・日）」を含む支出列が見つかりませんでした。")
+    if not base_exp_cols:
+        st.error("「（円／人）」を含む支出列が見つかりませんでした。")
         return
 
-    target_exp_col = st.sidebar.selectbox("比較したい支出項目", expense_cols)
+    base_exp_col = st.sidebar.selectbox("比較したい支出項目", base_exp_cols)
+
+    # ★ 1日あたりで見るかどうか
+    use_per_day = st.sidebar.checkbox(
+        "1日あたり（円／人・日）に換算して比較する",
+        value=False
+    )
+
+    # 実際に使う列名と単位を決定
+    target_exp_col = base_exp_col
+    unit = "円／人"
+
+    if use_per_day:
+        per_day_col = base_exp_col.replace("（円／人）", "（円／人・日）")
+        if per_day_col in df.columns:
+            target_exp_col = per_day_col
+            unit = "円／人・日"
+        else:
+            st.sidebar.warning("この項目の 1日あたり列（円／人・日）が見つからなかったため、総額（円／人）で表示します。")
 
     res_list = sorted(df[res_col].dropna().unique())
     res_selected = st.sidebar.multiselect(
@@ -1026,17 +1061,16 @@ def show_residence_compare_dashboard(df: pd.DataFrame):
         df_filtered = df_filtered[df_filtered["都道府県"].isin(pref_selected)]
 
     st.subheader("現在の条件（居住地ベース）")
-    st.write(f"- 比較項目：**{target_exp_col}**")
-    st.write(f"- 居住地　　：**{', '.join(res_selected) if res_selected else '（未選択）'}**")
+    st.write(f"- 比較項目：**{base_exp_col}**")
+    st.write(f"- 単位　　：**{unit}**")
+    st.write(f"- 居住地　：**{', '.join(res_selected) if res_selected else '（未選択）'}**")
     if pref_selected:
-        st.write(f"- 都道府県　：**{', '.join(pref_selected)}**")
+        st.write(f"- 都道府県：**{', '.join(pref_selected)}**")
 
     if df_filtered.empty:
         st.warning("この条件に一致するデータがありません。条件を見直してください。")
         return
 
-    # 単位ラベルを動的に変更
-    unit = "円／人・日" if "（円／人・日）" in target_exp_col else "円／人"
     y_col_name = f"平均額（{unit}）"
 
     summary = (
@@ -1053,7 +1087,7 @@ def show_residence_compare_dashboard(df: pd.DataFrame):
         summary,
         x=res_col,
         y=y_col_name,
-        title=f"{target_exp_col} の居住地別平均（{unit}）"
+        title=f"{base_exp_col} の居住地別平均（{unit}）"
     )
     fig.update_yaxes(tickformat=",")
     fig.update_traces(hovertemplate="%{x}: %{y:,.0f} 円")
