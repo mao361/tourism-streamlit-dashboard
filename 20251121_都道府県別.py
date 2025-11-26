@@ -90,6 +90,40 @@ def get_res_col(df: pd.DataFrame):
 
 
 # =========================================================
+# ヘルパー：滞在日数の数値 Series を取得（滞在日数_clean → 泊数）
+# =========================================================
+def get_stay_numeric_series(df: pd.DataFrame):
+    stay = None
+    if "滞在日数_clean" in df.columns:
+        stay = pd.to_numeric(df["滞在日数_clean"], errors="coerce")
+    elif "泊数" in df.columns:
+        stay = pd.to_numeric(df["泊数"], errors="coerce")
+    return stay
+
+
+# =========================================================
+# ヘルパー：1〜2日 / 3〜4日 / 5日以上 にバケット分け
+# =========================================================
+def bucket_stay_days_3groups(d):
+    """
+    1〜2日 / 3〜4日 / 5日以上 の3区分
+    """
+    if pd.isna(d):
+        return np.nan
+    try:
+        d = float(d)
+    except Exception:
+        return np.nan
+
+    if d <= 2:
+        return "1〜2日"
+    elif d <= 4:
+        return "3〜4日"
+    else:
+        return "5日以上"
+
+
+# =========================================================
 # データ読み込み
 # =========================================================
 @st.cache_data
@@ -115,7 +149,6 @@ def load_data():
             return df
 
     # （任意）居住地カラムを「居住地」に揃える試み
-    #   → うまく行かなくても get_res_col が拾うのでここはオマケ
     res_col = get_res_col(df)
     if res_col is not None and res_col != "居住地":
         df = df.rename(columns={res_col: "居住地"})
@@ -152,10 +185,8 @@ def load_data():
         )
         df["総支出（円／人）"] = pd.to_numeric(df["総支出（円／人）"], errors="coerce")
     else:
-    # big_exp_cols に入っている6つの費目を行方向に合計して「総支出」を作る
+        # big_exp_cols に入っている6つの費目を行方向に合計して「総支出」を作る
         df["総支出（円／人）"] = df[big_exp_cols].sum(axis=1)
-
-
 
     # 滞在日数をクレンジングして数値列を作る
     if "滞在日数" in df.columns:
@@ -165,12 +196,7 @@ def load_data():
 
     # ここから：1日あたりの金額を作る（円／人・日）
     # 日数のベース：滞在日数_clean → それがなければ泊数
-    days = None
-    if "滞在日数_clean" in df.columns:
-        days = df["滞在日数_clean"]
-    elif "泊数" in df.columns:
-        days = pd.to_numeric(df["泊数"], errors="coerce")
-
+    days = get_stay_numeric_series(df)
     if days is not None:
         days = days.replace(0, np.nan)
 
@@ -194,6 +220,102 @@ def show_pref_dashboard(df: pd.DataFrame):
     target_pref = st.selectbox("都道府県を選んでください", pref_list)
 
     df_pref = df[df["都道府県"] == target_pref].copy()
+
+    # ★ 滞在日数フィルタ（この都道府県を訪れた人を 3区分ボタンで絞る）
+    stay = get_stay_numeric_series(df_pref)
+    if stay is not None and not stay.dropna().empty:
+        df_pref["滞在日数_num"] = stay
+        df_pref["滞在日数カテゴリ3"] = df_pref["滞在日数_num"].apply(bucket_stay_days_3groups)
+
+        with st.expander("滞在日数で絞り込む（この都道府県を訪れた旅行者）"):
+            option = st.radio(
+                "滞在日数カテゴリを選択",
+                ["すべて", "1〜2日", "3〜4日", "5日以上"],
+                index=0,
+                key=f"stay_cat_pref_{target_pref}"
+            )
+            if option != "すべて":
+                df_pref = df_pref[df_pref["滞在日数カテゴリ3"] == option]
+                st.caption(
+                    f"※ {option} 滞在の旅行者に絞り込み中 "
+                    f"（サンプル数: {len(df_pref):,} 件）"
+                )
+
+    # ★ この都道府県での滞在日数の傾向
+    if "滞在日数_num" in df_pref.columns:
+        st.subheader("この都道府県での滞在日数の傾向")
+
+        stay2 = pd.to_numeric(df_pref["滞在日数_num"], errors="coerce").dropna()
+        if not stay2.empty:
+            c1, c2 = st.columns(2)
+            c1.metric("平均滞在日数", f"{stay2.mean():.1f} 日")
+            c2.metric("中央値", f"{stay2.median():.1f} 日")
+
+            bins = st.slider(
+                "滞在日数ヒストグラムの階級数（bins）",
+                min_value=5,
+                max_value=40,
+                value=15,
+                key=f"stay_bins_pref_{target_pref}"
+            )
+            fig_hist = px.histogram(
+                x=stay2,
+                nbins=bins,
+                title="滞在日数の分布"
+            )
+            fig_hist.update_xaxes(title="滞在日数（日）")
+            st.plotly_chart(fig_hist, use_container_width=True)
+
+            col_s1, col_s2 = st.columns(2)
+
+            # 国籍別の平均滞在日数
+            if "国籍・地域" in df_pref.columns:
+                tmp_nat = (
+                    df_pref[["国籍・地域", "滞在日数_num"]]
+                    .dropna()
+                )
+                if not tmp_nat.empty:
+                    nat_mean = (
+                        tmp_nat
+                        .groupby("国籍・地域")["滞在日数_num"]
+                        .mean()
+                        .reset_index()
+                        .sort_values("滞在日数_num", ascending=False)
+                        .head(10)
+                    )
+                    fig_nat_stay = px.bar(
+                        nat_mean,
+                        x="国籍・地域",
+                        y="滞在日数_num",
+                        title="国籍別 平均滞在日数（上位10）"
+                    )
+                    fig_nat_stay.update_yaxes(title="平均滞在日数（日）")
+                    col_s1.plotly_chart(fig_nat_stay, use_container_width=True)
+
+            # 居住地別の平均滞在日数
+            res_col = get_res_col(df_pref)
+            if res_col is not None:
+                tmp_res = (
+                    df_pref[[res_col, "滞在日数_num"]]
+                    .dropna()
+                )
+                if not tmp_res.empty:
+                    res_mean = (
+                        tmp_res
+                        .groupby(res_col)["滞在日数_num"]
+                        .mean()
+                        .reset_index()
+                        .sort_values("滞在日数_num", ascending=False)
+                        .head(10)
+                    )
+                    fig_res_stay = px.bar(
+                        res_mean,
+                        x=res_col,
+                        y="滞在日数_num",
+                        title="居住地別 平均滞在日数（上位10）"
+                    )
+                    fig_res_stay.update_yaxes(title="平均滞在日数（日）")
+                    col_s2.plotly_chart(fig_res_stay, use_container_width=True)
 
     st.subheader(f"{target_pref} を訪れた観光客の傾向")
 
@@ -279,60 +401,117 @@ def show_pref_dashboard(df: pd.DataFrame):
         )
         st.plotly_chart(fig_route, use_container_width=True)
 
+    # ★ 支出内訳（細かい項目も含める & 円／人 / 円／人・日 切り替え）
     st.subheader("平均支出内訳（1人あたり）")
 
     use_per_day = st.checkbox("1日あたり（円／人・日）で見る", value=False)
 
-    exp_map = {
-        "宿泊費（円／人）": "宿泊",
-        "飲食費（円／人）": "飲食",
-        "交通費（円／人）": "交通",
-        "娯楽等サービス費（円／人）": "娯楽",
-        "買物代（円／人）": "買物",
-        "その他費目（円／人）": "その他",
-    }
+    # この都道府県のデータに存在する「（円／人）」列をすべて対象にする
+    exp_cols = [c for c in df_pref.columns if "（円／人）" in c]
+    if not exp_cols:
+        st.write("支出関連の列が見つかりませんでした。")
+    else:
+        # 「何カテゴリまで表示するか」を選べるように（多すぎると見づらいので）
+        max_k = min(30, len(exp_cols))
+        top_k = st.slider(
+            "グラフに表示する支出カテゴリ数（平均額が大きい順）",
+            min_value=3,
+            max_value=max_k,
+            value=min(10, max_k)
+        )
 
-    rows = []
-    actually_used_cols = []
+        chart_rows = []   # グラフ用（カテゴリ, 値）
+        detail_rows = []  # テーブル用（カテゴリ, 平均額（円／人）, 平均額（円／人・日））
 
-    for base_col, label in exp_map.items():
-        per_day_col = base_col.replace("（円／人）", "（円／人・日）")
+        tmp_for_sort = []  # 平均額（円／人）でざっくりソート用
 
-        if use_per_day and per_day_col in df_pref.columns:
-            s = pd.to_numeric(df_pref[per_day_col], errors="coerce")
-            if not s.dropna().empty:
-                rows.append((label, s.mean()))
-                actually_used_cols.append(per_day_col)
+        for base_col in exp_cols:
+            # ラベル：単位部分を削る
+            if base_col == "総支出（円／人）":
+                label = "総支出"
+            else:
+                label = base_col.replace("（円／人）", "")
+
+            per_day_col = base_col.replace("（円／人）", "（円／人・日）")
+
+            mean_base = np.nan
+            mean_per_day = np.nan
+
+            # 円／人
+            if base_col in df_pref.columns:
+                s = pd.to_numeric(df_pref[base_col], errors="coerce")
+                if not s.dropna().empty:
+                    mean_base = s.mean()
+
+            # 円／人・日
+            if per_day_col in df_pref.columns:
+                s = pd.to_numeric(df_pref[per_day_col], errors="coerce")
+                if not s.dropna().empty:
+                    mean_per_day = s.mean()
+
+            # どちらか片方でも値があればテーブル用に追加
+            if not (np.isnan(mean_base) and np.isnan(mean_per_day)):
+                detail_rows.append(
+                    (label,
+                     None if np.isnan(mean_base) else mean_base,
+                     None if np.isnan(mean_per_day) else mean_per_day)
+                )
+                # ソート用（円／人が無ければ円／人・日で代用）
+                tmp_for_sort.append(
+                    (label, mean_base if not np.isnan(mean_base) else mean_per_day)
+                )
+
+        # 平均額が大きい順に並べて上位 top_k だけ可視化
+        tmp_for_sort = [
+            (lbl, val) for (lbl, val) in tmp_for_sort
+            if val is not None and not np.isnan(val)
+        ]
+        tmp_for_sort.sort(key=lambda x: x[1], reverse=True)
+        top_labels = [lbl for (lbl, _) in tmp_for_sort[:top_k]]
+
+        # グラフ用データを作成
+        for (label, mean_base, mean_per_day) in detail_rows:
+            if label not in top_labels:
                 continue
 
-        if base_col in df_pref.columns:
-            s = pd.to_numeric(df_pref[base_col], errors="coerce")
-            if not s.dropna().empty:
-                rows.append((label, s.mean()))
-                actually_used_cols.append(base_col)
+            value_for_chart = None
+            if use_per_day:
+                if mean_per_day is not None:
+                    value_for_chart = mean_per_day
+                elif mean_base is not None:
+                    value_for_chart = mean_base
+            else:
+                if mean_base is not None:
+                    value_for_chart = mean_base
+                elif mean_per_day is not None:
+                    value_for_chart = mean_per_day
 
-    if rows:
-        exp_df = pd.DataFrame(rows, columns=["カテゴリ", "平均額"])
+            if value_for_chart is not None:
+                chart_rows.append((label, value_for_chart))
 
-        if any("・日" in c for c in actually_used_cols):
-            unit = "円／人・日"
-        else:
-            unit = "円／人"
+        if chart_rows:
+            exp_df = pd.DataFrame(chart_rows, columns=["カテゴリ", "平均額"])
 
-        fig_exp = px.bar(
-            exp_df,
-            x="カテゴリ",
-            y="平均額",
-            title=f"平均支出内訳（{unit}）"
-        )
-        fig_exp.update_yaxes(tickformat=",")
-        fig_exp.update_traces(hovertemplate="%{x}: %{y:,.0f} 円")
-        st.plotly_chart(fig_exp, use_container_width=True)
+            unit = "円／人・日" if use_per_day else "円／人"
 
-        if use_per_day and unit == "円／人":
-            st.info("この都道府県では、1日あたりの支出が計算できなかったため、総額（円／人）で表示しています。")
-    else:
-        st.write("支出関連の列が見つかりませんでした。")
+            fig_exp = px.bar(
+                exp_df,
+                x="カテゴリ",
+                y="平均額",
+                title=f"平均支出内訳（{unit}） ※上位{top_k}カテゴリ"
+            )
+            fig_exp.update_yaxes(tickformat=",")
+            fig_exp.update_traces(hovertemplate="%{x}: %{y:,.0f} 円")
+            st.plotly_chart(fig_exp, use_container_width=True)
+
+        # 詳細テーブル（円／人 と 円／人・日 を両方表示）
+        if detail_rows:
+            detail_df = pd.DataFrame(
+                detail_rows,
+                columns=["カテゴリ", "平均額（円／人）", "平均額（円／人・日）"]
+            )
+            with st.expander("支出内訳の数値も見る（円／人 と 円／人・日）"):
+                st.dataframe(detail_df, use_container_width=True)
 
     st.markdown("---")
 
@@ -380,7 +559,6 @@ def show_pref_dashboard(df: pd.DataFrame):
 
 # =========================================================
 # ② 国籍×属性ダッシュボード
-# （ここは変更なし・そのまま）
 # =========================================================
 def show_segment_dashboard(df: pd.DataFrame):
     st.title("国籍×属性ダッシュボード")
@@ -409,6 +587,23 @@ def show_segment_dashboard(df: pd.DataFrame):
     if pref != "すべて":
         df_seg = df_seg[df_seg["都道府県"] == pref]
 
+    # ★ 滞在日数フィルタ（国籍ベース）→ 3区分ボタン
+    stay = get_stay_numeric_series(df_seg)
+    if stay is not None and not stay.dropna().empty:
+        df_seg["滞在日数_num"] = stay
+        df_seg["滞在日数カテゴリ3"] = df_seg["滞在日数_num"].apply(bucket_stay_days_3groups)
+
+        st.sidebar.markdown("---")
+        st.sidebar.markdown("**滞在日数で絞り込む**")
+        option = st.sidebar.radio(
+            "滞在日数カテゴリ",
+            ["すべて", "1〜2日", "3〜4日", "5日以上"],
+            index=0,
+            key="stay_cat_seg_nat"
+        )
+        if option != "すべて":
+            df_seg = df_seg[df_seg["滞在日数カテゴリ3"] == option]
+
     st.subheader("現在のセグメント（国籍ベース）")
     st.write(f"- 国籍・地域：**{nat}**")
     st.write(f"- 性年代　　：**{age}**")
@@ -429,13 +624,13 @@ def show_segment_dashboard(df: pd.DataFrame):
 
     avg_stay = None
     if "滞在日数_clean" in df_seg.columns:
-        stay = pd.to_numeric(df_seg["滞在日数_clean"], errors="coerce")
-        if not stay.dropna().empty:
-            avg_stay = stay.mean()
+        stay_seg = pd.to_numeric(df_seg["滞在日数_clean"], errors="coerce")
+        if not stay_seg.dropna().empty:
+            avg_stay = stay_seg.mean()
     elif "滞在日数" in df_seg.columns:
-        stay = pd.to_numeric(df_seg["滞在日数"], errors="coerce")
-        if not stay.dropna().empty:
-            avg_stay = stay.mean()
+        stay_seg = pd.to_numeric(df_seg["滞在日数"], errors="coerce")
+        if not stay_seg.dropna().empty:
+            avg_stay = stay_seg.mean()
 
     avg_total = None
     if "総支出（円／人）" in df_seg.columns:
@@ -523,7 +718,6 @@ def show_segment_dashboard(df: pd.DataFrame):
 
     st.markdown("---")
 
-    # ここから下は元のまま（都道府県・泊数などの分布） --------------------
     st.subheader("このセグメントが訪れている都道府県")
 
     pref_counts = (
@@ -575,8 +769,8 @@ def show_segment_dashboard(df: pd.DataFrame):
 
     # 滞在日数の分布（滞在日数_clean）
     if "滞在日数_clean" in df_seg.columns:
-        stay = pd.to_numeric(df_seg["滞在日数_clean"], errors="coerce").dropna()
-        if not stay.empty:
+        stay_dist = pd.to_numeric(df_seg["滞在日数_clean"], errors="coerce").dropna()
+        if not stay_dist.empty:
             bins_stay = st.slider(
                 "滞在日数ヒストグラムの階級数（bins, 国籍ベース）",
                 min_value=5,
@@ -584,7 +778,7 @@ def show_segment_dashboard(df: pd.DataFrame):
                 value=15
             )
             fig_stay = px.histogram(
-                x=stay,
+                x=stay_dist,
                 nbins=bins_stay,
                 title=f"滞在日数の分布（bins={bins_stay}, 国籍ベース）"
             )
@@ -592,7 +786,7 @@ def show_segment_dashboard(df: pd.DataFrame):
             st.plotly_chart(fig_stay, use_container_width=True)
 
             freq_stay = (
-                stay.value_counts()
+                stay_dist.value_counts()
                     .sort_index()
                     .reset_index()
             )
@@ -671,10 +865,10 @@ def show_segment_dashboard(df: pd.DataFrame):
 
 
 # =========================================================
-# ②' 居住地×属性ダッシュボード（新規・ここを修正）
+# ②' 居住地×属性ダッシュボード
 # =========================================================
 def show_residence_segment_dashboard(df: pd.DataFrame):
-    # ★ 居住地カラム名を柔軟に取得
+    # 居住地カラム名を柔軟に取得
     res_col = get_res_col(df)
     if res_col is None:
         st.error("居住地（または居住地・地域）に相当する列が見つかりません。")
@@ -706,6 +900,23 @@ def show_residence_segment_dashboard(df: pd.DataFrame):
     if pref != "すべて":
         df_seg = df_seg[df_seg["都道府県"] == pref]
 
+    # ★ 滞在日数フィルタ（居住地ベース）→ 3区分ボタン
+    stay = get_stay_numeric_series(df_seg)
+    if stay is not None and not stay.dropna().empty:
+        df_seg["滞在日数_num"] = stay
+        df_seg["滞在日数カテゴリ3"] = df_seg["滞在日数_num"].apply(bucket_stay_days_3groups)
+
+        st.sidebar.markdown("---")
+        st.sidebar.markdown("**滞在日数で絞り込む**")
+        option = st.sidebar.radio(
+            "滞在日数カテゴリ",
+            ["すべて", "1〜2日", "3〜4日", "5日以上"],
+            index=0,
+            key="stay_cat_seg_res"
+        )
+        if option != "すべて":
+            df_seg = df_seg[df_seg["滞在日数カテゴリ3"] == option]
+
     st.subheader("現在のセグメント（居住地ベース）")
     st.write(f"- 居住地　　：**{res}**")
     st.write(f"- 性年代　　：**{age}**")
@@ -726,13 +937,13 @@ def show_residence_segment_dashboard(df: pd.DataFrame):
 
     avg_stay = None
     if "滞在日数_clean" in df_seg.columns:
-        stay = pd.to_numeric(df_seg["滞在日数_clean"], errors="coerce")
-        if not stay.dropna().empty:
-            avg_stay = stay.mean()
+        stay_seg = pd.to_numeric(df_seg["滞在日数_clean"], errors="coerce")
+        if not stay_seg.dropna().empty:
+            avg_stay = stay_seg.mean()
     elif "滞在日数" in df_seg.columns:
-        stay = pd.to_numeric(df_seg["滞在日数"], errors="coerce")
-        if not stay.dropna().empty:
-            avg_stay = stay.mean()
+        stay_seg = pd.to_numeric(df_seg["滞在日数"], errors="coerce")
+        if not stay_seg.dropna().empty:
+            avg_stay = stay_seg.mean()
 
     avg_total = None
     if "総支出（円／人）" in df_seg.columns:
@@ -793,6 +1004,8 @@ def show_residence_segment_dashboard(df: pd.DataFrame):
     if rows:
         exp_df = pd.DataFrame(rows, columns=["カテゴリ", "平均額"])
 
+
+
         if any("・日" in c for c in actually_used_cols):
             unit = "円／人・日"
         else:
@@ -818,7 +1031,6 @@ def show_residence_segment_dashboard(df: pd.DataFrame):
 
     st.markdown("---")
 
-    # ここから下は元のまま --------------------------
     st.subheader("このセグメントが訪れている都道府県（居住地ベース）")
 
     pref_counts = (
@@ -870,8 +1082,8 @@ def show_residence_segment_dashboard(df: pd.DataFrame):
 
     # 滞在日数の分布（滞在日数_clean）
     if "滞在日数_clean" in df_seg.columns:
-        stay = pd.to_numeric(df_seg["滞在日数_clean"], errors="coerce").dropna()
-        if not stay.empty:
+        stay_dist = pd.to_numeric(df_seg["滞在日数_clean"], errors="coerce").dropna()
+        if not stay_dist.empty:
             bins_stay = st.slider(
                 "滞在日数ヒストグラムの階級数（bins, 居住地ベース）",
                 min_value=5,
@@ -879,7 +1091,7 @@ def show_residence_segment_dashboard(df: pd.DataFrame):
                 value=15
             )
             fig_stay = px.histogram(
-                x=stay,
+                x=stay_dist,
                 nbins=bins_stay,
                 title=f"滞在日数の分布（bins={bins_stay}, 居住地ベース）"
             )
@@ -887,7 +1099,7 @@ def show_residence_segment_dashboard(df: pd.DataFrame):
             st.plotly_chart(fig_stay, use_container_width=True)
 
             freq_stay = (
-                stay.value_counts()
+                stay_dist.value_counts()
                     .sort_index()
                     .reset_index()
             )
@@ -966,7 +1178,7 @@ def show_residence_segment_dashboard(df: pd.DataFrame):
 
 
 # =========================================================
-# ③ 国籍比較ダッシュボード（元のまま）
+# ③ 国籍比較ダッシュボード
 # =========================================================
 def show_nationality_compare_dashboard(df: pd.DataFrame):
     st.title("国籍比較ダッシュボード")
@@ -978,7 +1190,7 @@ def show_nationality_compare_dashboard(df: pd.DataFrame):
         st.error("国籍・地域 列がデータに存在しません。")
         return
 
-    # ★ 比較対象の選択肢は「（円／人）」だけにしておく
+    # 比較対象の選択肢は「（円／人）」だけにしておく
     base_exp_cols = [
         c for c in df.columns
         if "（円／人）" in c
@@ -989,7 +1201,7 @@ def show_nationality_compare_dashboard(df: pd.DataFrame):
 
     base_exp_col = st.sidebar.selectbox("比較したい支出項目", base_exp_cols)
 
-    # ★ 1日あたりで見るかどうかを選択
+    # 1日あたりで見るかどうかを選択
     use_per_day = st.sidebar.checkbox(
         "1日あたり（円／人・日）に換算して比較する",
         value=False
@@ -1034,6 +1246,23 @@ def show_nationality_compare_dashboard(df: pd.DataFrame):
     if pref_selected:
         df_filtered = df_filtered[df_filtered["都道府県"].isin(pref_selected)]
 
+    # ★ 滞在日数フィルタ（国籍比較ベース）→ 3区分ボタン
+    stay = get_stay_numeric_series(df_filtered)
+    if stay is not None and not stay.dropna().empty:
+        df_filtered["滞在日数_num"] = stay
+        df_filtered["滞在日数カテゴリ3"] = df_filtered["滞在日数_num"].apply(bucket_stay_days_3groups)
+
+        st.sidebar.markdown("---")
+        st.sidebar.markdown("**滞在日数で絞り込む**")
+        option = st.sidebar.radio(
+            "滞在日数カテゴリ",
+            ["すべて", "1〜2日", "3〜4日", "5日以上"],
+            index=0,
+            key="stay_cat_nat_compare"
+        )
+        if option != "すべて":
+            df_filtered = df_filtered[df_filtered["滞在日数カテゴリ3"] == option]
+
     st.subheader("現在の条件（国籍ベース）")
     st.write(f"- 比較項目：**{base_exp_col}**")
     st.write(f"- 単位　　：**{unit}**")
@@ -1071,7 +1300,7 @@ def show_nationality_compare_dashboard(df: pd.DataFrame):
 
 
 # =========================================================
-# ④ 居住地比較ダッシュボード（新規・修正版）
+# ④ 居住地比較ダッシュボード
 # =========================================================
 def show_residence_compare_dashboard(df: pd.DataFrame):
     st.title("居住地比較ダッシュボード")
@@ -1079,13 +1308,13 @@ def show_residence_compare_dashboard(df: pd.DataFrame):
 
     st.sidebar.markdown("### 比較条件（居住地ベース）")
 
-    # ★ 居住地カラム名を柔軟に取得
+    # 居住地カラム名を柔軟に取得
     res_col = get_res_col(df)
     if res_col is None:
         st.error("居住地（または居住地・地域）に相当する列が見つかりません。")
         return
 
-    # ★ 比較対象の選択肢は「（円／人）」だけにする
+    # 比較対象の選択肢は「（円／人）」だけにする
     base_exp_cols = [
         c for c in df.columns
         if "（円／人）" in c
@@ -1096,7 +1325,7 @@ def show_residence_compare_dashboard(df: pd.DataFrame):
 
     base_exp_col = st.sidebar.selectbox("比較したい支出項目", base_exp_cols)
 
-    # ★ 1日あたりで見るかどうか
+    # 1日あたりで見るかどうか
     use_per_day = st.sidebar.checkbox(
         "1日あたり（円／人・日）に換算して比較する",
         value=False
@@ -1135,6 +1364,23 @@ def show_residence_compare_dashboard(df: pd.DataFrame):
         df_filtered = df_filtered[df_filtered[res_col].isin(res_selected)]
     if pref_selected:
         df_filtered = df_filtered[df_filtered["都道府県"].isin(pref_selected)]
+
+    # ★ 滞在日数フィルタ（居住地比較ベース）→ 3区分ボタン
+    stay = get_stay_numeric_series(df_filtered)
+    if stay is not None and not stay.dropna().empty:
+        df_filtered["滞在日数_num"] = stay
+        df_filtered["滞在日数カテゴリ3"] = df_filtered["滞在日数_num"].apply(bucket_stay_days_3groups)
+
+        st.sidebar.markdown("---")
+        st.sidebar.markdown("**滞在日数で絞り込む**")
+        option = st.sidebar.radio(
+            "滞在日数カテゴリ",
+            ["すべて", "1〜2日", "3〜4日", "5日以上"],
+            index=0,
+            key="stay_cat_res_compare"
+        )
+        if option != "すべて":
+            df_filtered = df_filtered[df_filtered["滞在日数カテゴリ3"] == option]
 
     st.subheader("現在の条件（居住地ベース）")
     st.write(f"- 比較項目：**{base_exp_col}**")
