@@ -456,35 +456,74 @@ def show_segment_dashboard(df: pd.DataFrame):
 
     st.markdown("---")
 
-    st.subheader("平均支出内訳（円／人・円／人・日）")
+    # ここから：平均支出内訳（1人あたり） --------------------
+    st.subheader("平均支出内訳（1人あたり, 国籍ベース）")
 
-    expense_cols = [
-        c for c in df_seg.columns
-        if ("（円／人）" in c) or ("（円／人・日）" in c)
-    ]
+    use_per_day = st.checkbox(
+        "1日あたり（円／人・日）で見る（国籍ベース）",
+        value=False,
+        key="seg_use_per_day_nat"
+    )
 
-    if expense_cols:
-        mean_exp = df_seg[expense_cols].mean().sort_values(ascending=False)
-        exp_df = mean_exp.reset_index()
-        exp_df.columns = ["項目", "平均額"]
+    exp_map = {
+        "宿泊費（円／人）": "宿泊",
+        "飲食費（円／人）": "飲食",
+        "交通費（円／人）": "交通",
+        "娯楽等サービス費（円／人）": "娯楽",
+        "買物代（円／人）": "買物",
+        "その他費目（円／人）": "その他",
+    }
+
+    rows = []
+    actually_used_cols = []
+
+    for base_col, label in exp_map.items():
+        per_day_col = base_col.replace("（円／人）", "（円／人・日）")
+
+        # 1日あたりを優先
+        if use_per_day and per_day_col in df_seg.columns:
+            s = pd.to_numeric(df_seg[per_day_col], errors="coerce")
+            if not s.dropna().empty:
+                rows.append((label, s.mean()))
+                actually_used_cols.append(per_day_col)
+                continue
+
+        # なければ総額（円／人）
+        if base_col in df_seg.columns:
+            s = pd.to_numeric(df_seg[base_col], errors="coerce")
+            if not s.dropna().empty:
+                rows.append((label, s.mean()))
+                actually_used_cols.append(base_col)
+
+    if rows:
+        exp_df = pd.DataFrame(rows, columns=["カテゴリ", "平均額"])
+
+        if any("・日" in c for c in actually_used_cols):
+            unit = "円／人・日"
+        else:
+            unit = "円／人"
 
         fig_exp = px.bar(
             exp_df,
-            x="項目",
+            x="カテゴリ",
             y="平均額",
-            title="平均支出内訳（このセグメント, 国籍ベース）",
+            title=f"平均支出内訳（{unit}, このセグメント, 国籍ベース）",
         )
         fig_exp.update_yaxes(tickformat=",")
         fig_exp.update_traces(hovertemplate="%{x}: %{y:,.0f} 円")
         st.plotly_chart(fig_exp, use_container_width=True)
 
-        with st.expander("支出内訳の数値も見る"):
+        if use_per_day and unit == "円／人":
+            st.info("このセグメントでは 1日あたり列が見つからなかったため、総額（円／人）で表示しています。")
+
+        with st.expander("支出内訳の数値も見る（国籍ベース）"):
             st.dataframe(exp_df)
     else:
-        st.write("「（円／人）」や「（円／人・日）」を含む支出列が見つかりませんでした。")
+        st.write("支出関連の列が見つかりませんでした。")
 
     st.markdown("---")
 
+    # ここから下は元のまま（都道府県・泊数などの分布） --------------------
     st.subheader("このセグメントが訪れている都道府県")
 
     pref_counts = (
@@ -714,35 +753,72 @@ def show_residence_segment_dashboard(df: pd.DataFrame):
 
     st.markdown("---")
 
-    st.subheader("平均支出内訳（円／人・円／人・日, 居住地ベース）")
+    # ここから：平均支出内訳（1人あたり, 居住地ベース） ---------
+    st.subheader("平均支出内訳（1人あたり, 居住地ベース）")
 
-    expense_cols = [
-        c for c in df_seg.columns
-        if ("（円／人）" in c) or ("（円／人・日）" in c)
-    ]
+    use_per_day = st.checkbox(
+        "1日あたり（円／人・日）で見る（居住地ベース）",
+        value=False,
+        key="seg_use_per_day_res"
+    )
 
-    if expense_cols:
-        mean_exp = df_seg[expense_cols].mean().sort_values(ascending=False)
-        exp_df = mean_exp.reset_index()
-        exp_df.columns = ["項目", "平均額"]
+    exp_map = {
+        "宿泊費（円／人）": "宿泊",
+        "飲食費（円／人）": "飲食",
+        "交通費（円／人）": "交通",
+        "娯楽等サービス費（円／人）": "娯楽",
+        "買物代（円／人）": "買物",
+        "その他費目（円／人）": "その他",
+    }
+
+    rows = []
+    actually_used_cols = []
+
+    for base_col, label in exp_map.items():
+        per_day_col = base_col.replace("（円／人）", "（円／人・日）")
+
+        if use_per_day and per_day_col in df_seg.columns:
+            s = pd.to_numeric(df_seg[per_day_col], errors="coerce")
+            if not s.dropna().empty:
+                rows.append((label, s.mean()))
+                actually_used_cols.append(per_day_col)
+                continue
+
+        if base_col in df_seg.columns:
+            s = pd.to_numeric(df_seg[base_col], errors="coerce")
+            if not s.dropna().empty:
+                rows.append((label, s.mean()))
+                actually_used_cols.append(base_col)
+
+    if rows:
+        exp_df = pd.DataFrame(rows, columns=["カテゴリ", "平均額"])
+
+        if any("・日" in c for c in actually_used_cols):
+            unit = "円／人・日"
+        else:
+            unit = "円／人"
 
         fig_exp = px.bar(
             exp_df,
-            x="項目",
+            x="カテゴリ",
             y="平均額",
-            title="平均支出内訳（このセグメント, 居住地ベース）",
+            title=f"平均支出内訳（{unit}, このセグメント, 居住地ベース）",
         )
         fig_exp.update_yaxes(tickformat=",")
         fig_exp.update_traces(hovertemplate="%{x}: %{y:,.0f} 円")
         st.plotly_chart(fig_exp, use_container_width=True)
 
+        if use_per_day and unit == "円／人":
+            st.info("このセグメントでは 1日あたり列が見つからなかったため、総額（円／人）で表示しています。")
+
         with st.expander("支出内訳の数値も見る（居住地ベース）"):
             st.dataframe(exp_df)
     else:
-        st.write("「（円／人）」や「（円／人・日）」を含む支出列が見つかりませんでした。")
+        st.write("支出関連の列が見つかりませんでした。")
 
     st.markdown("---")
 
+    # ここから下は元のまま --------------------------
     st.subheader("このセグメントが訪れている都道府県（居住地ベース）")
 
     pref_counts = (
